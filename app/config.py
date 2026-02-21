@@ -27,6 +27,7 @@ TELEGRAM_BOT_TOKEN: str = _require("TELEGRAM_BOT_TOKEN")
 # ── Ollama (local LLM) ───────────────────────────────────────────────────────
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.2")
+OLLAMA_VISION_MODEL: str = os.getenv("OLLAMA_VISION_MODEL", "llava")
 
 # ── Authorization ─────────────────────────────────────────────────────────────
 # Comma-separated Telegram user IDs that are allowed to use the bot.
