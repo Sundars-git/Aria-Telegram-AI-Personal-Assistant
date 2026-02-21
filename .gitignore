@@ -1,0 +1,31 @@
+# Environment & secrets
+.env
+
+# SQLite database
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Old JSON memory (replaced by SQLite)
+memory.json
+memory.json.tmp
