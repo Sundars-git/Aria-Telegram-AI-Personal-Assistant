@@ -6,6 +6,8 @@ services:
     startCommand: python main.py
     plan: free
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: GEMINI_API_KEY
