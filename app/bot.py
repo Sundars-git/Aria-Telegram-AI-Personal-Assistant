@@ -5,17 +5,14 @@ Handlers registered here:
   /start   — welcome message
   /help    — command list
   /reset   — wipe the user's conversation memory
-  <text>   — normal message → Ollama response
-  <photo>  — image input → Ollama vision model analysis
+  <text>   — normal message → Claude response
 
 Each handler is fully async and logs meaningful context for debugging.
 An `authorized_only` decorator restricts access to allowed Telegram user IDs.
 """
 
-import base64
 import logging
 from functools import wraps
-from io import BytesIO
 
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
@@ -90,8 +87,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/start — introduce yourself\n"
         "/help  — show this message\n"
         "/reset — clear our conversation history\n\n"
-        "Send me *text* and I'll respond!\n"
-        "Send me a *photo* and I'll analyze it! 📷",
+        "Otherwise, just type anything and I'll respond!",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -107,96 +103,67 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("User %s reset their history.", user_id)
 
 
-# ── Message Handlers ──────────────────────────────────────────────────────────
-
-
-async def _send_reply(update: Update, reply: str) -> None:
-    """Send a reply, splitting if it exceeds Telegram's 4096-char limit."""
-    if len(reply) <= 4096:
-        await update.message.reply_text(  # type: ignore[union-attr]
-            reply, parse_mode=ParseMode.MARKDOWN
-        )
-    else:
-        chunks = [reply[i : i + 4096] for i in range(0, len(reply), 4096)]
-        for chunk in chunks:
-            await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+# ── Message Handler ───────────────────────────────────────────────────────────
 
 
 @authorized_only
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Text handler: receives a user message, queries Ollama, and replies.
+    Main handler: receives a user message, queries Claude, and replies.
+
+    Flow:
+      1. Load user's history from the database.
+      2. Append the new user message.
+      3. Send full history to Claude.
+      4. Append Claude's reply.
+      5. Persist updated history.
+      6. Send reply to Telegram.
     """
     user_id = update.effective_user.id  # type: ignore[union-attr]
     user_text = update.message.text  # type: ignore[union-attr]
 
     if not user_text:
-        return
+        return  # ignore non-text messages (stickers, photos, etc.)
 
     logger.info("Message from user %s: %.80s", user_id, user_text)
+
+    # Show typing indicator while we fetch the response
     await _send_typing(update)
 
+    # 1. Load existing history
     history = await memory.get_history(user_id)
+
+    # 2. Append the user's new message to history
     user_msg = {"role": "user", "content": user_text}
     history.append(user_msg)
 
     try:
+        # 3. Get Claude's response
         reply = await ai_client.get_ai_response(history)
     except Exception:
+        # Surface a friendly error without leaking internals
         await update.message.reply_text(  # type: ignore[union-attr]
             "⚠️ Sorry, I ran into an issue reaching my AI backend. "
             "Please try again in a moment."
         )
         return
 
+    # 4 & 5. Persist both turns together
     await memory.append_messages(
         user_id,
         [user_msg, {"role": "assistant", "content": reply}],
     )
-    await _send_reply(update, reply)
 
-
-@authorized_only
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Photo handler: downloads the image, encodes it, and sends it
-    to Ollama's vision model for analysis.
-    """
-    user_id = update.effective_user.id  # type: ignore[union-attr]
-    caption = update.message.caption or "What's in this image? Describe it in detail."  # type: ignore[union-attr]
-
-    logger.info("Photo from user %s (caption: %.80s)", user_id, caption)
-    await _send_typing(update)
-
-    # Download the highest resolution version of the photo
-    photo = update.message.photo[-1]  # type: ignore[union-attr]  # largest size
-    file = await photo.get_file()
-
-    buf = BytesIO()
-    await file.download_to_memory(buf)
-    image_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-
-    logger.debug("Image downloaded — %d bytes, base64 length %d.", buf.tell(), len(image_b64))
-
-    # Build history with the caption as user message
-    history = await memory.get_history(user_id)
-    user_msg = {"role": "user", "content": f"[📷 Image attached] {caption}"}
-    history.append(user_msg)
-
-    try:
-        reply = await ai_client.get_ai_response(history, image_b64=image_b64)
-    except Exception:
+    # 6. Reply — Telegram truncates messages over 4096 chars, so split if needed
+    if len(reply) <= 4096:
         await update.message.reply_text(  # type: ignore[union-attr]
-            "⚠️ Sorry, I couldn't analyze that image. "
-            "Please try again in a moment."
+            reply, parse_mode=ParseMode.MARKDOWN
         )
-        return
-
-    await memory.append_messages(
-        user_id,
-        [user_msg, {"role": "assistant", "content": reply}],
-    )
-    await _send_reply(update, reply)
+    else:
+        # Split on newline boundaries to preserve readability
+        chunks = [reply[i : i + 4096] for i in range(0, len(reply), 4096)]
+        for chunk in chunks:
+            await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
 
 
 # ── Error Handler ─────────────────────────────────────────────────────────────
@@ -226,12 +193,9 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("reset", cmd_reset))
 
-    # Register message handlers
+    # Register message handler (text only, ignore bot's own messages)
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
-    )
-    app.add_handler(
-        MessageHandler(filters.PHOTO, handle_photo)
     )
 
     # Register global error handler

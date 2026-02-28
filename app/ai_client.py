@@ -1,40 +1,53 @@
 """
-ai_client.py — Thin async wrapper around the Ollama local LLM API.
+ai_client.py — Thin async wrapper around the Google Gemini REST API.
 
 Responsibilities:
   - Accept a conversation history (list of role/content dicts).
-  - Support optional image inputs (base64-encoded) for vision models.
-  - Prepend the system prompt.
-  - Call Ollama's /api/chat endpoint and return the assistant's reply.
+  - Map the system prompt and history to Gemini's format.
+  - Call Gemini's generateContent endpoint and return the assistant's reply.
   - Surface clean, loggable errors to the caller.
 """
 
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 import httpx
 
-from app.config import OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_VISION_MODEL, SYSTEM_PROMPT
+from app.config import GEMINI_API_KEY, GEMINI_MODEL, SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
+# Gemini REST API endpoint
+_API_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    "{model}:generateContent?key={key}"
+)
+
 # Reusable async HTTP client — keeps connection pool alive across requests.
-_http_client = httpx.AsyncClient(timeout=180.0)
+_http_client = httpx.AsyncClient(timeout=120.0)
 
 
-async def get_ai_response(
-    history: List[Dict[str, str]],
-    image_b64: Optional[str] = None,
-) -> str:
+def _build_gemini_contents(history: List[Dict[str, str]]) -> list:
     """
-    Send the full conversation history to Ollama and return its response.
+    Convert our internal history format to Gemini REST API format.
+
+    Our format:   [{"role": "user"|"assistant", "content": "..."}]
+    Gemini format: [{"role": "user"|"model", "parts": [{"text": "..."}]}]
+    """
+    contents = []
+    for msg in history:
+        role = "model" if msg["role"] == "assistant" else "user"
+        contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+    return contents
+
+
+async def get_ai_response(history: List[Dict[str, str]]) -> str:
+    """
+    Send the full conversation history to Gemini and return its response.
 
     Args:
         history: List of {"role": "user"|"assistant", "content": "..."} dicts.
                  This should already include the latest user message at the end.
-        image_b64: Optional base64-encoded image string. When provided, the
-                   vision model is used and the image is attached to the last
-                   user message.
 
     Returns:
         The assistant's reply text.
@@ -42,55 +55,34 @@ async def get_ai_response(
     Raises:
         httpx.HTTPStatusError on API-level failures (caller should catch).
     """
-    # Choose model based on whether an image is present
-    model = OLLAMA_VISION_MODEL if image_b64 else OLLAMA_MODEL
+    contents = _build_gemini_contents(history)
 
-    # Build messages list with system prompt
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    url = _API_URL.format(model=GEMINI_MODEL, key=GEMINI_API_KEY)
 
-    for msg in history:
-        entry = {"role": msg["role"], "content": msg["content"]}
-        messages.append(entry)
-
-    # Attach image to the last user message if provided
-    if image_b64 and messages:
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i]["role"] == "user":
-                messages[i]["images"] = [image_b64]
-                break
+    payload = {
+        "contents": contents,
+        "systemInstruction": {
+            "parts": [{"text": SYSTEM_PROMPT}]
+        },
+    }
 
     try:
-        response = await _http_client.post(
-            f"{OLLAMA_BASE_URL}/api/chat",
-            json={
-                "model": model,
-                "messages": messages,
-                "stream": False,
-            },
-        )
+        response = await _http_client.post(url, json=payload)
         response.raise_for_status()
 
         data = response.json()
-        reply: str = data["message"]["content"]
-        logger.debug("Ollama responded (%d chars) using model '%s'.", len(reply), model)
+        reply: str = data["candidates"][0]["content"]["parts"][0]["text"]
+        logger.debug("Gemini responded (%d chars).", len(reply))
         return reply
-
-    except httpx.ConnectError:
-        logger.error(
-            "Cannot connect to Ollama at %s — is it running? "
-            "Start it with: ollama serve",
-            OLLAMA_BASE_URL,
-        )
-        raise
 
     except httpx.HTTPStatusError as exc:
         logger.error(
-            "Ollama API error %s: %s",
+            "Gemini API error %s: %s",
             exc.response.status_code,
-            exc.response.text[:200],
+            exc.response.text[:300],
         )
         raise
 
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Unexpected error calling Ollama: %s", exc)
+    except Exception as exc:
+        logger.exception("Unexpected error calling Gemini: %s", exc)
         raise

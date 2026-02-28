@@ -1,14 +1,15 @@
 """
 main.py — Entry point for the Telegram AI Assistant.
 
-Configures logging, then starts the bot in polling mode (suitable for local
-development and for Render/Railway free-tier deployments where no public
-HTTPS endpoint is available).
+Supports two modes:
+  • Polling  — for local development (default)
+  • Webhook  — for Render / cloud deployment (auto-detected via RENDER_EXTERNAL_URL)
 
-To switch to webhook mode for production, see the commented section below.
+Set RENDER_EXTERNAL_URL in environment or .env to enable webhook mode.
 """
 
 import logging
+import os
 import sys
 
 from app.bot import build_application
@@ -30,7 +31,7 @@ def configure_logging() -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
-# ── Post-init (runs before polling starts) ────────────────────────────────────
+# ── Post-init (runs before polling/webhook starts) ────────────────────────────
 
 async def on_startup(application) -> None:
     """Initialise the SQLite database on first launch."""
@@ -43,33 +44,34 @@ def main() -> None:
     configure_logging()
     logger = logging.getLogger(__name__)
 
-    logger.info("Starting Telegram AI Assistant…")
     application = build_application()
-
-    # Register the startup hook to initialise the database
     application.post_init = on_startup
 
-    # ── Polling mode (default) ────────────────────────────────────────────────
-    # Ideal for development and PaaS deployments without a fixed public URL.
-    application.run_polling(
-        poll_interval=1.0,          # seconds between getUpdates calls
-        timeout=20,                  # long-poll timeout
-        drop_pending_updates=True,  # ignore messages sent while bot was offline
-    )
+    # Auto-detect Render deployment
+    render_url = os.getenv("RENDER_EXTERNAL_URL")
 
-    # ── Webhook mode (production alternative) ────────────────────────────────
-    # Uncomment and set WEBHOOK_URL in your .env to use webhooks instead.
-    #
-    # import os
-    # webhook_url = os.environ["WEBHOOK_URL"]   # e.g. https://your-app.onrender.com
-    # application.run_webhook(
-    #     listen="0.0.0.0",
-    #     port=int(os.getenv("PORT", 8443)),
-    #     webhook_url=webhook_url,
-    #     drop_pending_updates=True,
-    # )
+    if render_url:
+        # ── Webhook mode (Render / cloud) ─────────────────────────────────────
+        port = int(os.getenv("PORT", "10000"))
+        webhook_url = f"{render_url}/webhook"
+        logger.info("Starting in WEBHOOK mode → %s (port %d)", webhook_url, port)
+
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path="/webhook",
+            webhook_url=webhook_url,
+            drop_pending_updates=True,
+        )
+    else:
+        # ── Polling mode (local development) ──────────────────────────────────
+        logger.info("Starting in POLLING mode (local dev)…")
+        application.run_polling(
+            poll_interval=1.0,
+            timeout=20,
+            drop_pending_updates=True,
+        )
 
 
 if __name__ == "__main__":
     main()
-
