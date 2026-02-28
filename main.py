@@ -39,17 +39,62 @@ async def on_startup(application) -> None:
     await memory.init_db()
 
 
+# ── Async webhook runner (Python 3.10+ compatible) ────────────────────────────
+
+async def run_webhook_async(application, port: int, webhook_url: str) -> None:
+    """
+    Manually manage the application lifecycle for webhook mode.
+    This avoids python-telegram-bot's run_webhook() which calls
+    asyncio.get_event_loop() — broken on Python 3.10+.
+    """
+    logger = logging.getLogger(__name__)
+
+    # Initialize the application
+    await application.initialize()
+
+    # Run post_init if set
+    if application.post_init:
+        await application.post_init(application)
+
+    # Set up the webhook
+    await application.bot.set_webhook(
+        url=webhook_url,
+        drop_pending_updates=True,
+    )
+
+    # Start the application (handlers, job queue, etc.)
+    await application.start()
+
+    # Start the built-in webhook server
+    await application.updater.start_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path="/webhook",
+        webhook_url=webhook_url,
+        drop_pending_updates=True,
+    )
+
+    logger.info("Webhook server running on port %d", port)
+
+    # Keep running until interrupted
+    stop_event = asyncio.Event()
+
+    try:
+        await stop_event.wait()
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        logger.info("Shutting down…")
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     configure_logging()
     logger = logging.getLogger(__name__)
-
-    # Ensure an event loop exists (fixes Python 3.10+ RuntimeError)
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
 
     application = build_application()
     application.post_init = on_startup
@@ -63,13 +108,9 @@ def main() -> None:
         webhook_url = f"{render_url}/webhook"
         logger.info("Starting in WEBHOOK mode → %s (port %d)", webhook_url, port)
 
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path="/webhook",
-            webhook_url=webhook_url,
-            drop_pending_updates=True,
-        )
+        # Use asyncio.run() instead of application.run_webhook()
+        # to avoid the "no current event loop" error on Python 3.10+.
+        asyncio.run(run_webhook_async(application, port, webhook_url))
     else:
         # ── Polling mode (local development) ──────────────────────────────────
         logger.info("Starting in POLLING mode (local dev)…")
