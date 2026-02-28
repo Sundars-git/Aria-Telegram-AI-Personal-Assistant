@@ -13,6 +13,8 @@ import logging
 import os
 import sys
 
+from telegram.ext import Application
+
 from app.bot import build_application
 from app import memory
 
@@ -41,12 +43,16 @@ async def on_startup(application) -> None:
 
 # ── Async webhook runner (Python 3.10+ compatible) ────────────────────────────
 
-async def run_webhook_async(application, port: int, webhook_url: str) -> None:
+async def run_webhook_async(application: Application, port: int, webhook_url: str) -> None:
     """
     Manually manage the application lifecycle for webhook mode.
-    This avoids python-telegram-bot's run_webhook() which calls
-    asyncio.get_event_loop() — broken on Python 3.10+.
+    Uses asyncio.run() from main() so we control the event loop,
+    avoiding python-telegram-bot's broken asyncio.get_event_loop().
+    Includes a health-check endpoint on "/" for UptimeRobot.
     """
+    from tornado.web import RequestHandler, Application as TornadoApp
+    from tornado.routing import RuleRouter, Rule, PathMatches
+
     logger = logging.getLogger(__name__)
 
     # Initialize the application
@@ -73,6 +79,24 @@ async def run_webhook_async(application, port: int, webhook_url: str) -> None:
         webhook_url=webhook_url,
         drop_pending_updates=True,
     )
+
+    # Inject a health-check route into the existing tornado server
+    # so "/" returns 200 OK on the same port for UptimeRobot.
+    try:
+        class HealthHandler(RequestHandler):
+            def get(self):
+                self.set_status(200)
+                self.write("Aria is alive ✓")
+
+        httpd = application.updater.httpd
+        if httpd and hasattr(httpd, '_app'):
+            # Add "/" route to the existing tornado application
+            existing_app = httpd._app
+            if hasattr(existing_app, 'add_handlers'):
+                existing_app.add_handlers(r".*", [(r"/", HealthHandler)])
+                logger.info("Health-check endpoint added on /")
+    except Exception as e:
+        logger.warning("Could not add health-check endpoint: %s", e)
 
     logger.info("Webhook server running on port %d", port)
 
