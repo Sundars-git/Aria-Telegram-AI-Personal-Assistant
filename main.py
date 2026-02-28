@@ -8,6 +8,7 @@ Supports two modes:
 Set RENDER_EXTERNAL_URL in environment or .env to enable webhook mode.
 """
 
+import asyncio
 import logging
 import os
 import sys
@@ -43,6 +44,12 @@ async def on_startup(application) -> None:
 def main() -> None:
     configure_logging()
     logger = logging.getLogger(__name__)
+
+    # Ensure an event loop exists (fixes Python 3.10+ RuntimeError)
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
     application = build_application()
     application.post_init = on_startup
