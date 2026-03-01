@@ -1,14 +1,18 @@
 # 🤖 Aria — Telegram AI Assistant
 
-A personal AI-powered Telegram bot built with [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) and [Google Gemini](https://ai.google.dev/). Aria can help with task management, research, writing, brainstorming, and general Q&A — all through Telegram.
+A personal AI-powered Telegram bot built with [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) and [Google Gemini](https://ai.google.dev/). Aria can chat, analyse images, transcribe voice messages, read PDFs, search the web, and summarise URLs — all through Telegram.
 
 ## ✨ Features
 
-- **Conversational AI** — Powered by Google Gemini (2.5 Flash by default)
-- **Persistent Memory** — Conversation history stored in SQLite (per-user)
-- **User Authorization** — Restrict access to specific Telegram user IDs
-- **Dual Deploy Mode** — Polling for local dev, webhooks for cloud (auto-detected)
-- **One-Click Deploy** — Render blueprint included (`render.yaml`)
+- **💬 Conversational AI** — Powered by Google Gemini (2.5 Flash by default) with persistent per-user memory
+- **🖼️ Image Analysis** — Send a photo and Aria describes & analyses it using Gemini Vision
+- **🎙️ Voice Messages** — Send a voice note and Aria transcribes it, then responds to the content
+- **📄 PDF Analysis** — Send a PDF document and Aria extracts the text and summarises it
+- **🔍 Web Search** — Use `/search <query>` to search the web via DuckDuckGo — results are summarised by Gemini
+- **🔗 URL Summarisation** — Send a URL in any message and Aria fetches the page and summarises it
+- **🔒 User Authorization** — Restrict access to specific Telegram user IDs
+- **☁️ Dual Deploy Mode** — Polling for local dev, webhooks for cloud (auto-detected)
+- **🚀 One-Click Deploy** — Render blueprint included (`render.yaml`)
 
 ## 📁 Project Structure
 
@@ -19,10 +23,13 @@ A personal AI-powered Telegram bot built with [python-telegram-bot](https://gith
 ├── .env.example         # Environment variable template
 └── app/
     ├── __init__.py
-    ├── bot.py           # Telegram handlers (/start, /help, /reset, messages)
-    ├── ai_client.py     # Async Gemini API wrapper
+    ├── bot.py           # Telegram handlers (commands + media + messages)
+    ├── ai_client.py     # Async Gemini API wrapper (text, vision, audio)
     ├── config.py        # Environment variable loader & system prompt
-    └── memory.py        # SQLite-backed conversation history
+    ├── memory.py        # SQLite-backed conversation history
+    ├── web_search.py    # DuckDuckGo web search skill
+    ├── url_summarizer.py # URL content extraction & summarisation
+    └── doc_reader.py    # PDF text extraction
 ```
 
 ## 🚀 Quick Start
@@ -76,13 +83,21 @@ This bot supports Render's free Web Service tier using webhook mode.
 
 ## 🤖 Bot Commands
 
-| Command  | Description                          |
-|----------|--------------------------------------|
-| `/start` | Welcome message                      |
-| `/help`  | Show available commands              |
-| `/reset` | Clear your conversation history      |
+| Command   | Description                                      |
+|-----------|--------------------------------------------------|
+| `/start`  | Welcome message with feature overview            |
+| `/help`   | Show all commands and supported media types       |
+| `/reset`  | Clear your conversation history                  |
+| `/search` | Search the web (e.g. `/search latest AI news`)   |
 
-Any other text message gets a response from Aria.
+### Supported Media
+
+| Media Type      | What Aria Does                                         |
+|-----------------|--------------------------------------------------------|
+| 📷 Photos      | Analyses the image; add a caption to ask a question     |
+| 🎙️ Voice/Audio | Transcribes the message and responds to the content    |
+| 📄 PDF Files   | Extracts text and provides summary or answers questions |
+| 🔗 URLs in text | Fetches the page and summarises the content            |
 
 ## ⚙️ Configuration
 
@@ -96,6 +111,18 @@ All config is via environment variables (`.env` file):
 | `ALLOWED_USER_IDS`   | ❌       | *(open mode)*      | Comma-separated Telegram user IDs        |
 | `DB_PATH`            | ❌       | `memory.db`        | SQLite database path                     |
 | `MAX_HISTORY`        | ❌       | `15`               | Max messages to keep per user            |
+
+## 🧰 Dependencies
+
+| Package              | Purpose                         |
+|----------------------|---------------------------------|
+| `python-telegram-bot`| Telegram Bot API framework      |
+| `httpx`              | Async HTTP client (Gemini API)  |
+| `aiosqlite`          | Async SQLite for memory         |
+| `duckduckgo_search`  | Web search (no API key needed)  |
+| `beautifulsoup4`     | HTML parsing for URL extraction |
+| `PyPDF2`             | PDF text extraction             |
+| `python-dotenv`      | Environment variable loading    |
 
 ## 📄 License
 
