@@ -6,7 +6,7 @@ Handlers registered here:
   /help    — command list
   /reset   — wipe the user's conversation memory
   /search  — web search via DuckDuckGo + Gemini summary
-  <text>   — normal message → Gemini response (with URL detection)
+  <text>   — normal message → Gemini response (with autonomous tool calling)
   <photo>  — image analysis via Gemini Vision
   <voice>  — voice transcription + response via Gemini
   <PDF>    — document analysis via PyPDF2 + Gemini
@@ -99,14 +99,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a welcome message when the user starts the bot."""
     user = update.effective_user
     await update.message.reply_text(  # type: ignore[union-attr]
-        f"👋 Hi {user.first_name}! I'm *Aria*, your personal AI assistant.\n\n"
+        f"👋 Hi {user.first_name}! I'm *Nila*, your personal AI executive assistant.\n\n"
         "Here's what I can do:\n"
         "💬 Chat & answer questions\n"
         "🖼️ Analyse photos you send me\n"
         "🎙️ Transcribe & respond to voice messages\n"
         "📄 Read & analyse PDF documents\n"
         "🔍 Search the web with /search\n"
-        "🔗 Summarise web pages — just send a URL\n\n"
+        "🔗 Summarise web pages — just send a URL\n"
+        "🧠 Remember things you tell me (long-term memory)\n"
+        "⏰ Set reminders — just ask!\n"
+        "📧 Read your Gmail & draft replies\n"
+        "📅 Check & create Google Calendar events\n\n"
         "Send me a message to get started, or use /help for all commands.",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -125,7 +129,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📷 Photos — send an image for analysis\n"
         "🎙️ Voice — send a voice message for transcription\n"
         "📄 PDFs — send a document for analysis\n"
-        "🔗 URLs — send a link and I'll summarise the page\n\n"
+        "🔗 URLs — send a link and I'll summarise the page\n"
+        "🧠 Memory — tell me to remember something\n"
+        "⏰ Reminders — ask me to remind you about anything\n"
+        "📧 Gmail — ask me to check your email or draft replies\n"
+        "📅 Calendar — ask about your schedule or create events\n\n"
         "Or just type anything and I'll respond!",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -358,27 +366,26 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await _safe_reply(update, reply)
 
 
-# ── Text Message Handler (with URL detection) ────────────────────────────────
+# ── Text Message Handler (with autonomous tool calling) ──────────────────────
 
 
 @authorized_only
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Main handler: receives a user message, queries Gemini, and replies.
-    Now also detects URLs and offers to summarise linked pages.
+    Main handler: receives a user message, queries Gemini with tools, and replies.
+
+    Gemini autonomously decides whether to use tools (search, memory, reminders,
+    URL summarization, etc.) based on the message content.
 
     Flow:
       1. Load user's history from the database.
-      2. Check if message contains URLs — if so, extract & summarise.
-      3. Append the new user message.
-      4. Send full history to Gemini.
-      5. Append Gemini's reply.
-      6. Persist updated history.
-      7. Send reply to Telegram.
+      2. Append the new user message.
+      3. Send full history + tool definitions to Gemini.
+      4. If Gemini calls a tool → execute → feed result back → repeat.
+      5. When Gemini returns final text → save and reply.
     """
-    from app import url_summarizer
-
     user_id = update.effective_user.id  # type: ignore[union-attr]
+    chat_id = update.effective_chat.id  # type: ignore[union-attr]
     user_text = update.message.text  # type: ignore[union-attr]
 
     if not user_text:
@@ -392,33 +399,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # 1. Load existing history
     history = await memory.get_history(user_id)
 
-    # 2. Check for URLs — extract content if found
-    urls = url_summarizer.find_urls(user_text)
-    extra_context = ""
+    # 2. Append user message
+    history.append({"role": "user", "content": user_text})
 
-    if urls:
-        for url in urls[:2]:  # Limit to 2 URLs max
-            logger.info("Extracting content from URL: %s", url)
-            content = await url_summarizer.extract_url_content(url)
-            if content and not content.startswith("Failed") and not content.startswith("Cannot"):
-                extra_context += f"\n\n---\n📄 Content from {url}:\n{content}\n---"
-
-    # 3. Build the user message
-    if extra_context:
-        enriched_text = (
-            f"{user_text}\n\n"
-            f"[The following web page content was automatically extracted for context. "
-            f"Use it to help answer the user's request.]{extra_context}"
-        )
-        user_msg = {"role": "user", "content": enriched_text}
-    else:
-        user_msg = {"role": "user", "content": user_text}
-
-    history.append(user_msg)
+    # 3. Build tool execution context
+    tool_context = {
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "bot_context": context,
+    }
 
     try:
-        # 4. Get Gemini's response
-        reply = await ai_client.get_ai_response(history)
+        # 4. Get Gemini's response (may involve tool calls)
+        reply = await ai_client.get_ai_response_with_tools(history, tool_context)
     except Exception:
         # Surface a friendly error without leaking internals
         await update.message.reply_text(  # type: ignore[union-attr]
@@ -427,13 +420,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    # 5 & 6. Persist both turns together (store original text, not enriched)
+    # 5. Persist both turns together
     await memory.append_messages(
         user_id,
         [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply}],
     )
 
-    # 7. Reply
+    # 6. Reply
     await _safe_reply(update, reply)
 
 

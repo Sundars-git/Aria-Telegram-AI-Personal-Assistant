@@ -29,3 +29,7 @@ Thumbs.db
 # Old JSON memory (replaced by SQLite)
 memory.json
 memory.json.tmp
+
+# Google OAuth2 credentials (NEVER commit these)
+credentials.json
+token.json

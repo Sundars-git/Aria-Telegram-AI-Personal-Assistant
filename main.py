@@ -16,7 +16,7 @@ import sys
 from telegram.ext import Application
 
 from app.bot import build_application
-from app import memory
+from app import memory, reminders
 
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
@@ -37,8 +37,10 @@ def configure_logging() -> None:
 # ── Post-init (runs before polling/webhook starts) ────────────────────────────
 
 async def on_startup(application) -> None:
-    """Initialise the SQLite database on first launch."""
+    """Initialise the SQLite database and reload pending reminders."""
     await memory.init_db()
+    await reminders.init_reminders_table()
+    await reminders.load_pending_reminders(application)
 
 
 # ── Async webhook runner (Python 3.10+ compatible) ────────────────────────────
@@ -86,7 +88,7 @@ async def run_webhook_async(application: Application, port: int, webhook_url: st
         class HealthHandler(RequestHandler):
             def get(self):
                 self.set_status(200)
-                self.write("Aria is alive ✓")
+                self.write("Nila is alive ✓")
 
         httpd = application.updater.httpd
         if httpd and hasattr(httpd, '_app'):

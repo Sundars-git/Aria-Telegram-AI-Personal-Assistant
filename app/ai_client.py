@@ -1,17 +1,18 @@
 """
-ai_client.py — Thin async wrapper around the Google Gemini REST API.
+ai_client.py — Async wrapper around the Google Gemini REST API.
 
 Responsibilities:
   - Accept a conversation history (list of role/content dicts).
   - Map the system prompt and history to Gemini's format.
   - Call Gemini's generateContent endpoint and return the assistant's reply.
   - Support multimodal inputs: images (vision) and audio (voice).
+  - Support autonomous tool/function calling with a dispatch loop.
   - Surface clean, loggable errors to the caller.
 """
 
 import base64
 import logging
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -28,6 +29,9 @@ _API_URL = (
 # Reusable async HTTP client — keeps connection pool alive across requests.
 _http_client = httpx.AsyncClient(timeout=120.0)
 
+# Maximum rounds of tool calls before giving up (prevents infinite loops)
+_MAX_TOOL_ROUNDS = 5
+
 
 def _build_gemini_contents(history: List[Dict[str, str]]) -> list:
     """
@@ -43,9 +47,9 @@ def _build_gemini_contents(history: List[Dict[str, str]]) -> list:
     return contents
 
 
-async def _call_gemini(payload: dict) -> str:
+async def _call_gemini(payload: dict) -> dict:
     """
-    Send a payload to Gemini and return the text response.
+    Send a payload to Gemini and return the raw response JSON.
     Shared by all response functions.
     """
     url = _API_URL.format(model=GEMINI_MODEL, key=GEMINI_API_KEY)
@@ -53,11 +57,7 @@ async def _call_gemini(payload: dict) -> str:
     try:
         response = await _http_client.post(url, json=payload)
         response.raise_for_status()
-
-        data = response.json()
-        reply: str = data["candidates"][0]["content"]["parts"][0]["text"]
-        logger.debug("Gemini responded (%d chars).", len(reply))
-        return reply
+        return response.json()
 
     except httpx.HTTPStatusError as exc:
         logger.error(
@@ -72,19 +72,18 @@ async def _call_gemini(payload: dict) -> str:
         raise
 
 
+def _extract_text(data: dict) -> str:
+    """Extract the text reply from a Gemini response dict."""
+    return data["candidates"][0]["content"]["parts"][0]["text"]
+
+
+# ── Standard text response (no tools) ────────────────────────────────────────
+
+
 async def get_ai_response(history: List[Dict[str, str]]) -> str:
     """
     Send the full conversation history to Gemini and return its response.
-
-    Args:
-        history: List of {"role": "user"|"assistant", "content": "..."} dicts.
-                 This should already include the latest user message at the end.
-
-    Returns:
-        The assistant's reply text.
-
-    Raises:
-        httpx.HTTPStatusError on API-level failures (caller should catch).
+    This is the simple, tool-free version — used by /search and other commands.
     """
     contents = _build_gemini_contents(history)
 
@@ -95,7 +94,98 @@ async def get_ai_response(history: List[Dict[str, str]]) -> str:
         },
     }
 
-    return await _call_gemini(payload)
+    data = await _call_gemini(payload)
+    reply = _extract_text(data)
+    logger.debug("Gemini responded (%d chars).", len(reply))
+    return reply
+
+
+# ── Tool-augmented response (autonomous function calling) ─────────────────────
+
+
+async def get_ai_response_with_tools(
+    history: List[Dict[str, str]],
+    tool_context: Dict[str, Any],
+) -> str:
+    """
+    Send conversation to Gemini with tool definitions.
+    If Gemini wants to call a tool, execute it and loop until a final
+    text response is produced.
+
+    Args:
+        history:      Conversation history including the latest user message.
+        tool_context: Dict with user_id, chat_id, bot_context for tool execution.
+
+    Returns:
+        The assistant's final text reply.
+    """
+    from app.tools import TOOL_DECLARATIONS, execute_tool
+
+    contents = _build_gemini_contents(history)
+
+    for round_num in range(_MAX_TOOL_ROUNDS):
+        payload = {
+            "contents": contents,
+            "tools": [{"functionDeclarations": TOOL_DECLARATIONS}],
+            "systemInstruction": {
+                "parts": [{"text": SYSTEM_PROMPT}]
+            },
+        }
+
+        data = await _call_gemini(payload)
+        candidate = data["candidates"][0]
+        parts = candidate["content"]["parts"]
+
+        # Check if Gemini wants to call a function
+        if "functionCall" in parts[0]:
+            fc = parts[0]["functionCall"]
+            func_name = fc["name"]
+            func_args = fc.get("args", {})
+
+            logger.info(
+                "Gemini tool call (round %d): %s(%s)",
+                round_num + 1, func_name, func_args,
+            )
+
+            # Execute the tool
+            result = await execute_tool(func_name, func_args, tool_context)
+
+            # Append the model's function call to contents
+            contents.append({
+                "role": "model",
+                "parts": [{"functionCall": {"name": func_name, "args": func_args}}],
+            })
+
+            # Append the function result
+            contents.append({
+                "role": "user",
+                "parts": [{
+                    "functionResponse": {
+                        "name": func_name,
+                        "response": {"content": result},
+                    }
+                }],
+            })
+
+            continue  # Loop back — Gemini will process the tool result
+
+        # It's a text response — we're done
+        reply = parts[0].get("text", "")
+        logger.debug(
+            "Gemini final response (%d chars, %d tool round(s)).",
+            len(reply), round_num,
+        )
+        return reply
+
+    # Exhausted tool rounds — return whatever we have
+    logger.warning("Exhausted %d tool rounds.", _MAX_TOOL_ROUNDS)
+    return (
+        "I've used all available tool calls for this request. "
+        "Please try rephrasing or breaking your question into smaller parts."
+    )
+
+
+# ── Vision (image analysis) ──────────────────────────────────────────────────
 
 
 async def get_vision_response(
@@ -107,15 +197,6 @@ async def get_vision_response(
     """
     Send an image (with optional caption) to Gemini Vision and return
     the assistant's analysis.
-
-    Args:
-        history:     Previous conversation history for context.
-        image_bytes: Raw bytes of the image file.
-        mime_type:   MIME type of the image (e.g. "image/jpeg").
-        caption:     Optional user caption / question about the image.
-
-    Returns:
-        The assistant's reply text describing / analysing the image.
     """
     contents = _build_gemini_contents(history)
 
@@ -142,7 +223,11 @@ async def get_vision_response(
         },
     }
 
-    return await _call_gemini(payload)
+    data = await _call_gemini(payload)
+    return _extract_text(data)
+
+
+# ── Audio (voice transcription + response) ───────────────────────────────────
 
 
 async def get_audio_response(
@@ -152,14 +237,6 @@ async def get_audio_response(
 ) -> str:
     """
     Send an audio clip to Gemini and return a transcription + response.
-
-    Args:
-        history:     Previous conversation history for context.
-        audio_bytes: Raw bytes of the audio file.
-        mime_type:   MIME type of the audio (e.g. "audio/ogg").
-
-    Returns:
-        The assistant's reply with transcription and contextual response.
     """
     contents = _build_gemini_contents(history)
 
@@ -190,4 +267,5 @@ async def get_audio_response(
         },
     }
 
-    return await _call_gemini(payload)
+    data = await _call_gemini(payload)
+    return _extract_text(data)
