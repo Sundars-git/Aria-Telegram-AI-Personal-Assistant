@@ -13,6 +13,7 @@ Setup:
   6. Run `python -m app.google_auth` once to authorize and generate token.json
 """
 
+import json
 import logging
 import os
 from typing import Optional
@@ -34,29 +35,42 @@ SCOPES = [
 _CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json")
 _TOKEN_PATH = os.getenv("GOOGLE_TOKEN_PATH", "token.json")
 
+# For cloud deployment: paste the entire token.json content as an env var
+_TOKEN_JSON_ENV = os.getenv("GOOGLE_TOKEN_JSON", "")
+
 
 def get_credentials() -> Optional[Credentials]:
     """
     Load and return valid Google API credentials.
 
     Priority:
-      1. Load existing token.json → refresh if expired
-      2. If no token.json → run the OAuth consent flow (interactive, one-time)
-      3. Return None if credentials.json is missing
+      1. GOOGLE_TOKEN_JSON env var (for cloud deployment like Render)
+      2. token.json file (for local development)
+      3. Interactive OAuth flow (first-time setup, local only)
+      4. Return None if nothing is configured
 
     Returns:
         google.oauth2.credentials.Credentials or None if not configured.
     """
     creds = None
 
-    # Try to load existing token
-    if os.path.exists(_TOKEN_PATH):
+    # Priority 1: Load from GOOGLE_TOKEN_JSON env var (Render / cloud)
+    if _TOKEN_JSON_ENV:
+        try:
+            token_data = json.loads(_TOKEN_JSON_ENV)
+            creds = Credentials.from_authorized_user_info(token_data, SCOPES)
+            logger.info("Loaded Google credentials from GOOGLE_TOKEN_JSON env var.")
+        except Exception as exc:
+            logger.warning("Could not load GOOGLE_TOKEN_JSON: %s", exc)
+
+    # Priority 2: Load from token.json file (local)
+    if not creds and os.path.exists(_TOKEN_PATH):
         try:
             creds = Credentials.from_authorized_user_file(_TOKEN_PATH, SCOPES)
         except Exception as exc:
             logger.warning("Could not load token.json: %s", exc)
 
-    # Refresh or re-authorize
+    # Refresh expired token
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
@@ -66,13 +80,13 @@ def get_credentials() -> Optional[Credentials]:
             logger.error("Token refresh failed: %s", exc)
             creds = None
 
+    # Priority 3: Interactive OAuth flow (local only)
     if not creds or not creds.valid:
         if not os.path.exists(_CREDENTIALS_PATH):
             logger.warning(
-                "Google credentials not found at '%s'. "
-                "Gmail and Calendar features are disabled. "
-                "See app/google_auth.py docstring for setup instructions.",
-                _CREDENTIALS_PATH,
+                "Google credentials not configured. "
+                "Set GOOGLE_TOKEN_JSON env var (for Render) "
+                "or run `python -m app.google_auth` locally.",
             )
             return None
 
@@ -88,6 +102,7 @@ def get_credentials() -> Optional[Credentials]:
             return None
 
     return creds
+
 
 
 def _save_token(creds: Credentials) -> None:
