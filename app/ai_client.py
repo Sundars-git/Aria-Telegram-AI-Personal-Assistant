@@ -112,77 +112,84 @@ async def get_ai_response_with_tools(
     If Gemini wants to call a tool, execute it and loop until a final
     text response is produced.
 
-    Args:
-        history:      Conversation history including the latest user message.
-        tool_context: Dict with user_id, chat_id, bot_context for tool execution.
-
-    Returns:
-        The assistant's final text reply.
+    Falls back to a plain (no-tools) response if function calling fails.
     """
     from app.tools import TOOL_DECLARATIONS, execute_tool
 
     contents = _build_gemini_contents(history)
 
-    for round_num in range(_MAX_TOOL_ROUNDS):
-        payload = {
-            "contents": contents,
-            "tools": [{"functionDeclarations": TOOL_DECLARATIONS}],
-            "systemInstruction": {
-                "parts": [{"text": SYSTEM_PROMPT}]
-            },
-        }
+    try:
+        for round_num in range(_MAX_TOOL_ROUNDS):
+            payload = {
+                "contents": contents,
+                "tools": [{"functionDeclarations": TOOL_DECLARATIONS}],
+                "systemInstruction": {
+                    "parts": [{"text": SYSTEM_PROMPT}]
+                },
+            }
 
-        data = await _call_gemini(payload)
-        candidate = data["candidates"][0]
-        parts = candidate["content"]["parts"]
+            data = await _call_gemini(payload)
+            candidate = data["candidates"][0]
+            parts = candidate["content"]["parts"]
 
-        # Check if Gemini wants to call a function
-        if "functionCall" in parts[0]:
-            fc = parts[0]["functionCall"]
-            func_name = fc["name"]
-            func_args = fc.get("args", {})
+            # Check if Gemini wants to call a function
+            if "functionCall" in parts[0]:
+                fc = parts[0]["functionCall"]
+                func_name = fc["name"]
+                func_args = fc.get("args", {})
 
-            logger.info(
-                "Gemini tool call (round %d): %s(%s)",
-                round_num + 1, func_name, func_args,
+                logger.info(
+                    "Gemini tool call (round %d): %s(%s)",
+                    round_num + 1, func_name, func_args,
+                )
+
+                # Execute the tool
+                result = await execute_tool(func_name, func_args, tool_context)
+
+                # Append the model's function call to contents
+                contents.append({
+                    "role": "model",
+                    "parts": [{"functionCall": {"name": func_name, "args": func_args}}],
+                })
+
+                # Append the function result (role MUST be "function")
+                contents.append({
+                    "role": "function",
+                    "parts": [{
+                        "functionResponse": {
+                            "name": func_name,
+                            "response": {"name": func_name, "content": result},
+                        }
+                    }],
+                })
+
+                continue  # Loop back — Gemini will process the tool result
+
+            # It's a text response — we're done
+            reply = parts[0].get("text", "")
+            logger.debug(
+                "Gemini final response (%d chars, %d tool round(s)).",
+                len(reply), round_num,
             )
+            return reply
 
-            # Execute the tool
-            result = await execute_tool(func_name, func_args, tool_context)
-
-            # Append the model's function call to contents
-            contents.append({
-                "role": "model",
-                "parts": [{"functionCall": {"name": func_name, "args": func_args}}],
-            })
-
-            # Append the function result
-            contents.append({
-                "role": "user",
-                "parts": [{
-                    "functionResponse": {
-                        "name": func_name,
-                        "response": {"content": result},
-                    }
-                }],
-            })
-
-            continue  # Loop back — Gemini will process the tool result
-
-        # It's a text response — we're done
-        reply = parts[0].get("text", "")
-        logger.debug(
-            "Gemini final response (%d chars, %d tool round(s)).",
-            len(reply), round_num,
+        # Exhausted tool rounds
+        logger.warning("Exhausted %d tool rounds.", _MAX_TOOL_ROUNDS)
+        return (
+            "I've used all available tool calls for this request. "
+            "Please try rephrasing or breaking your question into smaller parts."
         )
-        return reply
 
-    # Exhausted tool rounds — return whatever we have
-    logger.warning("Exhausted %d tool rounds.", _MAX_TOOL_ROUNDS)
-    return (
-        "I've used all available tool calls for this request. "
-        "Please try rephrasing or breaking your question into smaller parts."
-    )
+    except Exception as exc:
+        # If tool-calling fails, fall back to a plain response without tools
+        logger.warning(
+            "Tool-calling failed (%s), falling back to plain response.", exc,
+        )
+        try:
+            return await get_ai_response(history)
+        except Exception:
+            raise  # Re-raise so the handler shows the error message
+
 
 
 # ── Vision (image analysis) ──────────────────────────────────────────────────
